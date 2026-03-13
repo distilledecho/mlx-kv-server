@@ -3,6 +3,19 @@
 > Instructions for Claude Code. Read this file before writing any code in this repo.
 > For project-wide architecture context, design principles, and vision: see `daemon` repo — `CLAUDE.md` and `PRD.md`.
 
+**At the start of every session, before writing any code:**
+
+1. Read the issue you are working on, including all comments:
+   ```bash
+   gh issue view {number} --repo distilledecho/mlx-kv-server --comments
+   ```
+2. Read any ADR issues referenced in the issue body:
+   ```bash
+   gh issue view {adr-number} --repo distilledecho/daemon --comments
+   ```
+
+Issue comments are the living record of decisions made after the issue was filed. Always read them — do not rely on the issue body alone.
+
 ---
 
 ## What This Repo Is
