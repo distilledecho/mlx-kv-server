@@ -1,0 +1,68 @@
+name: Claude PR Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get PR diff
+        id: diff
+        run: |
+          git diff origin/${{ github.base_ref }}...HEAD > pr.diff
+          echo "diff_size=$(wc -c < pr.diff)" >> $GITHUB_OUTPUT
+
+      - name: Read review checklist
+        id: checklist
+        run: |
+          CHECKLIST=$(cat CLAUDE.md | grep -A 50 "## Review Checklist" | head -60)
+          echo "checklist<<EOF" >> $GITHUB_OUTPUT
+          echo "$CHECKLIST" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Claude first-pass review
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          DIFF=$(cat pr.diff)
+          CHECKLIST="${{ steps.checklist.outputs.checklist }}"
+
+          RESPONSE=$(curl -s https://api.anthropic.com/v1/messages \
+            -H "x-api-key: $ANTHROPIC_API_KEY" \
+            -H "anthropic-version: 2023-06-01" \
+            -H "content-type: application/json" \
+            -d "{
+              \"model\": \"claude-sonnet-4-20250514\",
+              \"max_tokens\": 2000,
+              \"system\": \"You are a code reviewer for the Daemon project. You perform first-pass PR reviews against a specific checklist. Be concise and specific. Flag real issues clearly. If something looks correct, say so briefly. Do not pad the review.\",
+              \"messages\": [{
+                \"role\": \"user\",
+                \"content\": \"Review this PR diff against the checklist below. For each checklist item, give a one-line pass/flag/na verdict. Then list any issues found in order of severity. End with an overall recommendation: APPROVE, REQUEST_CHANGES, or COMMENT.\n\nCHECKLIST:\n$CHECKLIST\n\nDIFF:\n$DIFF\"
+              }]
+            }")
+
+          echo "$RESPONSE" | jq -r '.content[0].text' > review.md
+
+      - name: Post review comment
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const review = fs.readFileSync('review.md', 'utf8');
+            await github.rest.pulls.createReview({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.payload.pull_request.number,
+              body: `## Claude First-Pass Review\n\n${review}\n\n---\n*Automated first-pass review. Human review and merge decision by @hyperrealist.*`,
+              event: 'COMMENT'
+            });
