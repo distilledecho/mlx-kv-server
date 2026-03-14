@@ -8,7 +8,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from mlx_kv_server.cache import CacheEntry, KVCacheStore
-from mlx_kv_server.primitives import generate, prefill
+from mlx_kv_server.primitives import checkpoint, evict, generate, prefill, rollback
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -182,3 +182,163 @@ class TestGenerate:
             )
 
         assert len(result) == 3
+
+
+# ---------------------------------------------------------------------------
+# checkpoint
+# ---------------------------------------------------------------------------
+
+
+class TestCheckpoint:
+    def test_returns_current_length(self) -> None:
+        store = KVCacheStore()
+        store.put("c1", CacheEntry(cache=[MagicMock()], length=10))
+        position = asyncio.run(checkpoint("c1", store))
+        assert position == 10
+
+    def test_returns_zero_for_empty_cache(self) -> None:
+        store = KVCacheStore()
+        store.put("c1", CacheEntry(cache=[MagicMock()], length=0))
+        position = asyncio.run(checkpoint("c1", store))
+        assert position == 0
+
+    def test_raises_if_cache_not_found(self) -> None:
+        store = KVCacheStore()
+        with pytest.raises(ValueError, match="cache not found"):
+            asyncio.run(checkpoint("missing", store))
+
+    def test_does_not_mutate_store(self) -> None:
+        store = KVCacheStore()
+        entry = CacheEntry(cache=[MagicMock()], length=5)
+        store.put("c1", entry)
+        asyncio.run(checkpoint("c1", store))
+        assert store.get("c1") is entry
+        assert store.get("c1").length == 5  # type: ignore[union-attr]
+
+
+# ---------------------------------------------------------------------------
+# rollback
+# ---------------------------------------------------------------------------
+
+
+def _make_trimmable_layer(offset: int) -> MagicMock:
+    """Return a mock KVCache layer that tracks trim calls."""
+    layer = MagicMock()
+    layer.is_trimmable.return_value = True
+    layer.trim = MagicMock(side_effect=lambda n: None)
+    return layer
+
+
+class TestRollback:
+    def test_trims_layers_by_correct_amount(self) -> None:
+        store = KVCacheStore()
+        layer = _make_trimmable_layer(offset=10)
+        store.put("c1", CacheEntry(cache=[layer], length=10))
+
+        position = asyncio.run(rollback("c1", 6, store))
+
+        assert position == 6
+        layer.trim.assert_called_once_with(4)  # 10 - 6 = 4
+
+    def test_updates_entry_length(self) -> None:
+        store = KVCacheStore()
+        layer = _make_trimmable_layer(offset=8)
+        store.put("c1", CacheEntry(cache=[layer], length=8))
+
+        asyncio.run(rollback("c1", 3, store))
+
+        assert store.get("c1").length == 3  # type: ignore[union-attr]
+
+    def test_rollback_to_zero(self) -> None:
+        store = KVCacheStore()
+        layer = _make_trimmable_layer(offset=5)
+        store.put("c1", CacheEntry(cache=[layer], length=5))
+
+        position = asyncio.run(rollback("c1", 0, store))
+
+        assert position == 0
+        layer.trim.assert_called_once_with(5)
+
+    def test_rollback_to_current_position_is_noop(self) -> None:
+        store = KVCacheStore()
+        layer = _make_trimmable_layer(offset=7)
+        store.put("c1", CacheEntry(cache=[layer], length=7))
+
+        position = asyncio.run(rollback("c1", 7, store))
+
+        assert position == 7
+        layer.trim.assert_called_once_with(0)
+
+    def test_raises_if_cache_not_found(self) -> None:
+        store = KVCacheStore()
+        with pytest.raises(ValueError, match="cache not found"):
+            asyncio.run(rollback("missing", 0, store))
+
+    def test_raises_if_position_negative(self) -> None:
+        store = KVCacheStore()
+        store.put("c1", CacheEntry(cache=[MagicMock()], length=5))
+        with pytest.raises(ValueError, match="out of range"):
+            asyncio.run(rollback("c1", -1, store))
+
+    def test_raises_if_position_beyond_length(self) -> None:
+        store = KVCacheStore()
+        store.put("c1", CacheEntry(cache=[MagicMock()], length=5))
+        with pytest.raises(ValueError, match="out of range"):
+            asyncio.run(rollback("c1", 6, store))
+
+    def test_raises_for_non_trimmable_layers(self) -> None:
+        # A partial rollback (some layers trimmed, others not) would leave the
+        # length counter disagreeing with actual per-layer offsets.  Better to
+        # fail loudly so the problem surfaces at deployment time.
+        store = KVCacheStore()
+        layer = MagicMock()
+        layer.is_trimmable.return_value = False
+        store.put("c1", CacheEntry(cache=[layer], length=5))
+
+        with pytest.raises(RuntimeError, match="does not support trim"):
+            asyncio.run(rollback("c1", 3, store))
+
+    def test_checkpoint_then_rollback_restores_position(self) -> None:
+        """checkpoint + rollback round-trip."""
+        store = KVCacheStore()
+        layer = _make_trimmable_layer(offset=10)
+        store.put("c1", CacheEntry(cache=[layer], length=10))
+
+        saved = asyncio.run(checkpoint("c1", store))
+        # Simulate additional tokens being added
+        store.put("c1", CacheEntry(cache=[layer], length=15))
+
+        asyncio.run(rollback("c1", saved, store))
+
+        assert store.get("c1").length == saved  # type: ignore[union-attr]
+
+
+# ---------------------------------------------------------------------------
+# evict
+# ---------------------------------------------------------------------------
+
+
+class TestEvict:
+    def test_removes_entry_from_store(self) -> None:
+        store = KVCacheStore()
+        store.put("c1", CacheEntry(cache=[MagicMock()], length=5))
+
+        result = asyncio.run(evict("c1", store))
+
+        assert result is True
+        assert not store.has("c1")
+
+    def test_raises_if_cache_not_found(self) -> None:
+        store = KVCacheStore()
+        with pytest.raises(ValueError, match="cache not found"):
+            asyncio.run(evict("missing", store))
+
+    def test_does_not_affect_other_entries(self) -> None:
+        store = KVCacheStore()
+        store.put("c1", CacheEntry(cache=[MagicMock()], length=5))
+        store.put("c2", CacheEntry(cache=[MagicMock()], length=3))
+
+        asyncio.run(evict("c1", store))
+
+        assert not store.has("c1")
+        assert store.has("c2")

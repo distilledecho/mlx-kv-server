@@ -24,7 +24,7 @@ from typing import Any
 
 from .cache import KVCacheStore
 from .config import Config
-from .primitives import generate, prefill
+from .primitives import checkpoint, evict, generate, prefill, rollback
 
 logger = logging.getLogger(__name__)
 
@@ -94,6 +94,40 @@ async def _handle_generate(
     await _send(writer, {"id": req_id, "done": True})
 
 
+async def _handle_checkpoint(
+    writer: asyncio.StreamWriter,
+    req_id: int,
+    params: dict[str, Any],
+    cache_store: KVCacheStore,
+) -> None:
+    cache_id: str = params["cache_id"]
+    position = await checkpoint(cache_id, cache_store)
+    await _send(writer, {"id": req_id, "result": {"position": position}})
+
+
+async def _handle_rollback(
+    writer: asyncio.StreamWriter,
+    req_id: int,
+    params: dict[str, Any],
+    cache_store: KVCacheStore,
+) -> None:
+    cache_id: str = params["cache_id"]
+    position: int = int(params["position"])
+    restored = await rollback(cache_id, position, cache_store)
+    await _send(writer, {"id": req_id, "result": {"position": restored}})
+
+
+async def _handle_evict(
+    writer: asyncio.StreamWriter,
+    req_id: int,
+    params: dict[str, Any],
+    cache_store: KVCacheStore,
+) -> None:
+    cache_id: str = params["cache_id"]
+    await evict(cache_id, cache_store)
+    await _send(writer, {"id": req_id, "result": {"freed": cache_id}})
+
+
 # ---------------------------------------------------------------------------
 # Connection handler
 # ---------------------------------------------------------------------------
@@ -142,6 +176,12 @@ async def _handle_connection(
                         lock,
                         config,
                     )
+                elif method == "checkpoint":
+                    await _handle_checkpoint(writer, req_id, params, cache_store)
+                elif method == "rollback":
+                    await _handle_rollback(writer, req_id, params, cache_store)
+                elif method == "evict":
+                    await _handle_evict(writer, req_id, params, cache_store)
                 else:
                     await _send_error(writer, req_id, f"unknown method: {method!r}")
             except (KeyError, TypeError) as exc:

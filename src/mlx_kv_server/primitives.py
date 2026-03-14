@@ -170,3 +170,118 @@ async def generate(
         cache_id,
         CacheEntry(cache=prompt_cache, length=entry.length + len(tokens)),
     )
+
+
+# ---------------------------------------------------------------------------
+# checkpoint
+# ---------------------------------------------------------------------------
+
+
+async def checkpoint(cache_id: str, cache_store: KVCacheStore) -> int:
+    """Snapshot the current cache state by returning the current token position.
+
+    The returned position can be passed to :func:`rollback` to restore the
+    cache to this point.
+
+    Args:
+        cache_id: Opaque cache handle (must already exist).
+        cache_store: Shared KV cache store.
+
+    Returns:
+        Current token position (number of tokens prefilled so far).
+
+    Raises:
+        ValueError: If *cache_id* is not found in the store.
+    """
+    entry = cache_store.get(cache_id)
+    if entry is None:
+        raise ValueError(f"cache not found: {cache_id!r}")
+    return entry.length
+
+
+# ---------------------------------------------------------------------------
+# rollback
+# ---------------------------------------------------------------------------
+
+
+def _sync_rollback(prompt_cache: list[Any], tokens_to_trim: int) -> None:
+    """Trim *tokens_to_trim* tokens from each layer in *prompt_cache*.
+
+    KVCache.trim() is a metadata-only offset update (self.offset -= n) — no
+    tensor mutation, no MLX compute.  No model lock is needed here.
+
+    Raises:
+        RuntimeError: If any layer does not support trim.  A partial rollback
+            (some layers trimmed, others not) would leave the length counter
+            disagreeing with the actual per-layer offsets, which is worse than
+            a loud failure.
+    """
+    for i, layer_cache in enumerate(prompt_cache):
+        if not (hasattr(layer_cache, "is_trimmable") and layer_cache.is_trimmable()):
+            raise RuntimeError(
+                f"layer {i} ({type(layer_cache).__name__}) does not support trim; "
+                "rollback is not safe for models with non-trimmable cache layers"
+            )
+        layer_cache.trim(tokens_to_trim)
+
+
+async def rollback(
+    cache_id: str,
+    position: int,
+    cache_store: KVCacheStore,
+) -> int:
+    """Restore the KV cache for *cache_id* to *position*, invalidating later tokens.
+
+    Trims the per-layer KVCache offsets so the cache matches *position*.
+    Tokens after *position* are no longer visible to the model.
+
+    No model lock is acquired: KVCache.trim() is a pure metadata update
+    (offset arithmetic only) with no MLX compute.  The model lock exists to
+    serialise forward passes, not offset bookkeeping.
+
+    Args:
+        cache_id: Opaque cache handle (must already exist).
+        position: Target token position to restore to (0 ≤ position ≤ current length).
+        cache_store: Shared KV cache store.
+
+    Returns:
+        *position* — the restored token position.
+
+    Raises:
+        ValueError: If *cache_id* is not found or *position* is out of range.
+        RuntimeError: If any cache layer does not support trim.
+    """
+    entry = cache_store.get(cache_id)
+    if entry is None:
+        raise ValueError(f"cache not found: {cache_id!r}")
+    if position < 0 or position > entry.length:
+        raise ValueError(f"position {position} out of range [0, {entry.length}]")
+
+    _sync_rollback(entry.cache, entry.length - position)
+
+    cache_store.put(cache_id, CacheEntry(cache=entry.cache, length=position))
+    return position
+
+
+# ---------------------------------------------------------------------------
+# evict
+# ---------------------------------------------------------------------------
+
+
+async def evict(cache_id: str, cache_store: KVCacheStore) -> bool:
+    """Free GPU memory for *cache_id* by removing it from the cache store.
+
+    Args:
+        cache_id: Opaque cache handle to remove.
+        cache_store: Shared KV cache store.
+
+    Returns:
+        True if the entry was removed.
+
+    Raises:
+        ValueError: If *cache_id* is not found in the store.
+    """
+    deleted = cache_store.delete(cache_id)
+    if not deleted:
+        raise ValueError(f"cache not found: {cache_id!r}")
+    return True
