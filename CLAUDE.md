@@ -149,6 +149,16 @@ Use the PR template. Every PR must include:
 
 **Do not merge your own PRs.**
 
+### Closing a Session
+
+After opening a PR, always copy the diff to the clipboard for human review:
+
+```bash
+gh pr diff $(gh pr view --json number -q .number) --repo distilledecho/mlx-kv-server | pbcopy
+```
+
+Then tell the user: "PR #{number} is open. Diff copied to clipboard — paste into Claude.ai for first-pass review."
+
 ### Board Management
 
 Move issues on the project board as you work:
