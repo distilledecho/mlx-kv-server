@@ -39,7 +39,10 @@ jobs:
 
           # Truncate diff if too large (keep first 20k chars)
           if [ ${#DIFF} -gt 20000 ]; then
-            DIFF="${DIFF:0:20000}"$'\n\n[diff truncated — too large for review]'
+            TRUNCATED="${DIFF:0:20000}"
+            DIFF="$TRUNCATED
+
+          [diff truncated — too large for review]"
           fi
 
           PAYLOAD=$(jq -n \
