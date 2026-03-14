@@ -172,7 +172,20 @@ gh project item-edit ... # → In Review
 
 ---
 
-## Open Questions
+## Review Checklist (First-Pass Review by Claude)
+
+When reviewing a PR, check:
+
+1. **No business logic** — does this PR add anything beyond model loading, cache management, or the five primitives? If so, flag it.
+2. **Async integrity** — are there any blocking calls on the main thread? All MLX ops must be offloaded to threads.
+3. **Config hygiene** — are any socket paths, model names, or cache settings hardcoded? Everything must come from config.
+4. **Container boundary** — does anything expose KV tensors directly? Cache handles must remain opaque references.
+5. **No containerization** — does this PR add a Dockerfile or container CI? It must not.
+6. **Tests** — does every new primitive have a corresponding test? Cache state transitions tested?
+7. **Scope** — does this change add anything outside the five primitives and cache management?
+8. **ADR** — does this contradict any resolved decision in the `daemon` repo PRD.md without a filed ADR?
+
+---
 
 Before implementing anything that touches these areas, flag rather than assume:
 
