@@ -235,7 +235,7 @@ class TestRollback:
         layer = _make_trimmable_layer(offset=10)
         store.put("c1", CacheEntry(cache=[layer], length=10))
 
-        position = asyncio.run(rollback("c1", 6, store, asyncio.Lock()))
+        position = asyncio.run(rollback("c1", 6, store))
 
         assert position == 6
         layer.trim.assert_called_once_with(4)  # 10 - 6 = 4
@@ -245,7 +245,7 @@ class TestRollback:
         layer = _make_trimmable_layer(offset=8)
         store.put("c1", CacheEntry(cache=[layer], length=8))
 
-        asyncio.run(rollback("c1", 3, store, asyncio.Lock()))
+        asyncio.run(rollback("c1", 3, store))
 
         assert store.get("c1").length == 3  # type: ignore[union-attr]
 
@@ -254,7 +254,7 @@ class TestRollback:
         layer = _make_trimmable_layer(offset=5)
         store.put("c1", CacheEntry(cache=[layer], length=5))
 
-        position = asyncio.run(rollback("c1", 0, store, asyncio.Lock()))
+        position = asyncio.run(rollback("c1", 0, store))
 
         assert position == 0
         layer.trim.assert_called_once_with(5)
@@ -264,7 +264,7 @@ class TestRollback:
         layer = _make_trimmable_layer(offset=7)
         store.put("c1", CacheEntry(cache=[layer], length=7))
 
-        position = asyncio.run(rollback("c1", 7, store, asyncio.Lock()))
+        position = asyncio.run(rollback("c1", 7, store))
 
         assert position == 7
         layer.trim.assert_called_once_with(0)
@@ -272,29 +272,31 @@ class TestRollback:
     def test_raises_if_cache_not_found(self) -> None:
         store = KVCacheStore()
         with pytest.raises(ValueError, match="cache not found"):
-            asyncio.run(rollback("missing", 0, store, asyncio.Lock()))
+            asyncio.run(rollback("missing", 0, store))
 
     def test_raises_if_position_negative(self) -> None:
         store = KVCacheStore()
         store.put("c1", CacheEntry(cache=[MagicMock()], length=5))
         with pytest.raises(ValueError, match="out of range"):
-            asyncio.run(rollback("c1", -1, store, asyncio.Lock()))
+            asyncio.run(rollback("c1", -1, store))
 
     def test_raises_if_position_beyond_length(self) -> None:
         store = KVCacheStore()
         store.put("c1", CacheEntry(cache=[MagicMock()], length=5))
         with pytest.raises(ValueError, match="out of range"):
-            asyncio.run(rollback("c1", 6, store, asyncio.Lock()))
+            asyncio.run(rollback("c1", 6, store))
 
-    def test_skips_non_trimmable_layers(self) -> None:
+    def test_raises_for_non_trimmable_layers(self) -> None:
+        # A partial rollback (some layers trimmed, others not) would leave the
+        # length counter disagreeing with actual per-layer offsets.  Better to
+        # fail loudly so the problem surfaces at deployment time.
         store = KVCacheStore()
         layer = MagicMock()
         layer.is_trimmable.return_value = False
         store.put("c1", CacheEntry(cache=[layer], length=5))
 
-        # Should not raise even though layer is non-trimmable
-        asyncio.run(rollback("c1", 3, store, asyncio.Lock()))
-        layer.trim.assert_not_called()
+        with pytest.raises(RuntimeError, match="does not support trim"):
+            asyncio.run(rollback("c1", 3, store))
 
     def test_checkpoint_then_rollback_restores_position(self) -> None:
         """checkpoint + rollback round-trip."""
@@ -306,7 +308,7 @@ class TestRollback:
         # Simulate additional tokens being added
         store.put("c1", CacheEntry(cache=[layer], length=15))
 
-        asyncio.run(rollback("c1", saved, store, asyncio.Lock()))
+        asyncio.run(rollback("c1", saved, store))
 
         assert store.get("c1").length == saved  # type: ignore[union-attr]
 

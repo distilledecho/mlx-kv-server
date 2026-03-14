@@ -110,11 +110,10 @@ async def _handle_rollback(
     req_id: int,
     params: dict[str, Any],
     cache_store: KVCacheStore,
-    lock: asyncio.Lock,
 ) -> None:
     cache_id: str = params["cache_id"]
     position: int = int(params["position"])
-    restored = await rollback(cache_id, position, cache_store, lock)
+    restored = await rollback(cache_id, position, cache_store)
     await _send(writer, {"id": req_id, "result": {"position": restored}})
 
 
@@ -180,7 +179,7 @@ async def _handle_connection(
                 elif method == "checkpoint":
                     await _handle_checkpoint(writer, req_id, params, cache_store)
                 elif method == "rollback":
-                    await _handle_rollback(writer, req_id, params, cache_store, lock)
+                    await _handle_rollback(writer, req_id, params, cache_store)
                 elif method == "evict":
                     await _handle_evict(writer, req_id, params, cache_store)
                 else:

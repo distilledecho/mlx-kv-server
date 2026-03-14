@@ -205,34 +205,51 @@ async def checkpoint(cache_id: str, cache_store: KVCacheStore) -> int:
 
 
 def _sync_rollback(prompt_cache: list[Any], tokens_to_trim: int) -> None:
-    """Trim *tokens_to_trim* tokens from each trimmable layer in *prompt_cache*."""
-    for layer_cache in prompt_cache:
-        if hasattr(layer_cache, "is_trimmable") and layer_cache.is_trimmable():
-            layer_cache.trim(tokens_to_trim)
+    """Trim *tokens_to_trim* tokens from each layer in *prompt_cache*.
+
+    KVCache.trim() is a metadata-only offset update (self.offset -= n) — no
+    tensor mutation, no MLX compute.  No model lock is needed here.
+
+    Raises:
+        RuntimeError: If any layer does not support trim.  A partial rollback
+            (some layers trimmed, others not) would leave the length counter
+            disagreeing with the actual per-layer offsets, which is worse than
+            a loud failure.
+    """
+    for i, layer_cache in enumerate(prompt_cache):
+        if not (hasattr(layer_cache, "is_trimmable") and layer_cache.is_trimmable()):
+            raise RuntimeError(
+                f"layer {i} ({type(layer_cache).__name__}) does not support trim; "
+                "rollback is not safe for models with non-trimmable cache layers"
+            )
+        layer_cache.trim(tokens_to_trim)
 
 
 async def rollback(
     cache_id: str,
     position: int,
     cache_store: KVCacheStore,
-    lock: asyncio.Lock,
 ) -> int:
     """Restore the KV cache for *cache_id* to *position*, invalidating later tokens.
 
-    Trims the per-layer KVCache objects so that the cache offset matches
-    *position*. Tokens after *position* are no longer visible to the model.
+    Trims the per-layer KVCache offsets so the cache matches *position*.
+    Tokens after *position* are no longer visible to the model.
+
+    No model lock is acquired: KVCache.trim() is a pure metadata update
+    (offset arithmetic only) with no MLX compute.  The model lock exists to
+    serialise forward passes, not offset bookkeeping.
 
     Args:
         cache_id: Opaque cache handle (must already exist).
         position: Target token position to restore to (0 ≤ position ≤ current length).
         cache_store: Shared KV cache store.
-        lock: Async lock serialising model access.
 
     Returns:
         *position* — the restored token position.
 
     Raises:
         ValueError: If *cache_id* is not found or *position* is out of range.
+        RuntimeError: If any cache layer does not support trim.
     """
     entry = cache_store.get(cache_id)
     if entry is None:
@@ -240,10 +257,7 @@ async def rollback(
     if position < 0 or position > entry.length:
         raise ValueError(f"position {position} out of range [0, {entry.length}]")
 
-    tokens_to_trim = entry.length - position
-
-    async with lock:
-        await asyncio.to_thread(_sync_rollback, entry.cache, tokens_to_trim)
+    _sync_rollback(entry.cache, entry.length - position)
 
     cache_store.put(cache_id, CacheEntry(cache=entry.cache, length=position))
     return position
