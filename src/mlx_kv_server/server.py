@@ -191,14 +191,11 @@ async def run_server(
 
     lock = asyncio.Lock()
 
-    def make_handler(
-        r: asyncio.StreamReader, w: asyncio.StreamWriter
-    ) -> "asyncio.Task[None]":
-        return asyncio.create_task(
-            _handle_connection(r, w, model, tokenizer, cache_store, lock, config)
-        )
+    async def handler(r: asyncio.StreamReader, w: asyncio.StreamWriter) -> None:
+        await _handle_connection(r, w, model, tokenizer, cache_store, lock, config)
 
-    server = await asyncio.start_unix_server(make_handler, path=socket_path)
+    server = await asyncio.start_unix_server(handler, path=socket_path)
+
     logger.info(
         "mlx-kv-server listening on %s (model=%s)", socket_path, config.model_name
     )

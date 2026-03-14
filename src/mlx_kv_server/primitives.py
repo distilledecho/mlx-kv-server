@@ -149,6 +149,9 @@ async def generate(
             loop.call_soon_threadsafe(queue.put_nowait, None)
 
     async with lock:
+        # Lock is held for the full generation duration by design.
+        # This server is single-user; concurrent inference on unified memory
+        # degrades performance unacceptably. See PRD.md — Priority Scheduling.
         thread = threading.Thread(target=_run_generation, daemon=True)
         thread.start()
 
