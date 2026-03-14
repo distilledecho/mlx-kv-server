@@ -64,8 +64,7 @@ jobs:
           echo "Raw API response: $RESPONSE"
 
           # Extract text, fall back to error message if API call failed
-          TEXT=$(echo "$RESPONSE" | jq -r '.content[0].text // .error.message // "API call failed — see workflow logs for raw response."')
-          echo "$TEXT" > review.md
+          echo "$RESPONSE" | jq -r '.content[0].text // .error.message // "API call failed — see workflow logs for raw response."' > review.md
           cat review.md
 
       - name: Post review comment
@@ -74,10 +73,15 @@ jobs:
           script: |
             const fs = require('fs');
             const review = fs.readFileSync('review.md', 'utf8');
-            await github.rest.pulls.createReview({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              pull_number: context.payload.pull_request.number,
-              body: `## Claude First-Pass Review\n\n${review}\n\n---\n*Automated first-pass review. Human review and merge decision by @hyperrealist.*`,
-              event: 'COMMENT'
-            });
+            const body = '## Claude First-Pass Review\n\n' + review + '\n\n---\n*Automated first-pass review. Human review and merge decision by @hyperrealist.*';
+
+            try {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.payload.pull_request.number,
+                body: body
+              });
+            } catch (error) {
+              core.setFailed(`Failed to post review: ${error.message}\n\nReview content:\n${review}`);
+            }
