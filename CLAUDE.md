@@ -154,7 +154,7 @@ Use the PR template. Every PR must include:
 After opening a PR, always copy the diff to the clipboard for human review:
 
 ```bash
-gh pr diff $(gh pr view --json number -q .number) --repo distilledecho/mlx-kv-server | pbcopy
+gh pr diff $(gh pr view --json number -q .number) --repo distilledecho/mlx-kv-server -- ':!uv.lock' | pbcopy
 ```
 
 Then tell the user: "PR #{number} is open. Diff copied to clipboard — paste into Claude.ai for first-pass review."
