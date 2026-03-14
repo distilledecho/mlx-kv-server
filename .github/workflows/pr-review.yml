@@ -17,10 +17,10 @@ jobs:
           fetch-depth: 0
 
       - name: Get PR diff (excluding lockfiles)
+        id: diff
         run: |
           git diff origin/${{ github.base_ref }}...HEAD -- ':!uv.lock' ':!package-lock.json' ':!*.lock' > pr.diff
           echo "diff_lines=$(wc -l < pr.diff)" >> $GITHUB_OUTPUT
-        id: diff
 
       - name: Read review checklist
         id: checklist
@@ -55,12 +55,18 @@ jobs:
               }]
             }')
 
-          curl -s https://api.anthropic.com/v1/messages \
+          RESPONSE=$(curl -s https://api.anthropic.com/v1/messages \
             -H "x-api-key: $ANTHROPIC_API_KEY" \
             -H "anthropic-version: 2023-06-01" \
             -H "content-type: application/json" \
-            -d "$PAYLOAD" \
-            | jq -r '.content[0].text' > review.md
+            -d "$PAYLOAD")
+
+          echo "Raw API response: $RESPONSE"
+
+          # Extract text, fall back to error message if API call failed
+          TEXT=$(echo "$RESPONSE" | jq -r '.content[0].text // .error.message // "API call failed — see workflow logs for raw response."')
+          echo "$TEXT" > review.md
+          cat review.md
 
       - name: Post review comment
         uses: actions/github-script@v7
