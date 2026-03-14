@@ -12,7 +12,7 @@ classifiers = [
     "Programming Language :: Python :: 3.13",
 ]
 description = "A mlx runtiume wrapper with kv cache ops"
-dependencies = [] # Add project dependencies here, e.g. ["click", "numpy"]
+dependencies = ["mlx-lm>=0.21.0"]
 dynamic = ["version"]
 license.file = "LICENSE"
 readme = "README.md"

@@ -1,0 +1,14 @@
+# mlx-kv-server configuration
+# Copy this file to config.toml and edit as needed.
+
+# Unix socket path — must be writable by the server process.
+socket_path = "/tmp/mlx-kv-server.sock"
+
+# HuggingFace repo id or local path to a model supported by mlx_lm.
+model_name = "mlx-community/Mistral-7B-Instruct-v0.3-4bit"
+
+# Maximum number of tokens to generate per generate() call.
+max_tokens = 512
+
+# Sampling temperature (0.0 = greedy / deterministic).
+temperature = 0.0
