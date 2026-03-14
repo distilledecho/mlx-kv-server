@@ -17,32 +17,22 @@ jobs:
           fetch-depth: 0
 
       - name: Get PR diff (excluding lockfiles)
-        id: diff
         run: |
           git diff origin/${{ github.base_ref }}...HEAD -- ':!uv.lock' ':!package-lock.json' ':!*.lock' > pr.diff
-          echo "diff_lines=$(wc -l < pr.diff)" >> $GITHUB_OUTPUT
 
       - name: Read review checklist
-        id: checklist
         run: |
-          CHECKLIST=$(grep -A 50 "## Review Checklist" CLAUDE.md | head -60)
-          echo "checklist<<EOF" >> $GITHUB_OUTPUT
-          echo "$CHECKLIST" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
+          grep -A 50 "## Review Checklist" CLAUDE.md | head -60 > checklist.txt || echo "No checklist found" > checklist.txt
 
       - name: Claude first-pass review
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
-          CHECKLIST="${{ steps.checklist.outputs.checklist }}"
+          CHECKLIST=$(cat checklist.txt)
           DIFF=$(cat pr.diff)
 
-          # Truncate diff if too large (keep first 20k chars)
           if [ ${#DIFF} -gt 20000 ]; then
-            TRUNCATED="${DIFF:0:20000}"
-            DIFF="$TRUNCATED
-
-          [diff truncated — too large for review]"
+            DIFF=$(printf '%s\n[diff truncated]' "${DIFF:0:20000}")
           fi
 
           PAYLOAD=$(jq -n \
@@ -66,7 +56,6 @@ jobs:
 
           echo "Raw API response: $RESPONSE"
 
-          # Extract text, fall back to error message if API call failed
           echo "$RESPONSE" | jq -r '.content[0].text // .error.message // "API call failed — see workflow logs for raw response."' > review.md
           cat review.md
 
