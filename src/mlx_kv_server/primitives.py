@@ -170,3 +170,104 @@ async def generate(
         cache_id,
         CacheEntry(cache=prompt_cache, length=entry.length + len(tokens)),
     )
+
+
+# ---------------------------------------------------------------------------
+# checkpoint
+# ---------------------------------------------------------------------------
+
+
+async def checkpoint(cache_id: str, cache_store: KVCacheStore) -> int:
+    """Snapshot the current cache state by returning the current token position.
+
+    The returned position can be passed to :func:`rollback` to restore the
+    cache to this point.
+
+    Args:
+        cache_id: Opaque cache handle (must already exist).
+        cache_store: Shared KV cache store.
+
+    Returns:
+        Current token position (number of tokens prefilled so far).
+
+    Raises:
+        ValueError: If *cache_id* is not found in the store.
+    """
+    entry = cache_store.get(cache_id)
+    if entry is None:
+        raise ValueError(f"cache not found: {cache_id!r}")
+    return entry.length
+
+
+# ---------------------------------------------------------------------------
+# rollback
+# ---------------------------------------------------------------------------
+
+
+def _sync_rollback(prompt_cache: list[Any], tokens_to_trim: int) -> None:
+    """Trim *tokens_to_trim* tokens from each trimmable layer in *prompt_cache*."""
+    for layer_cache in prompt_cache:
+        if hasattr(layer_cache, "is_trimmable") and layer_cache.is_trimmable():
+            layer_cache.trim(tokens_to_trim)
+
+
+async def rollback(
+    cache_id: str,
+    position: int,
+    cache_store: KVCacheStore,
+    lock: asyncio.Lock,
+) -> int:
+    """Restore the KV cache for *cache_id* to *position*, invalidating later tokens.
+
+    Trims the per-layer KVCache objects so that the cache offset matches
+    *position*. Tokens after *position* are no longer visible to the model.
+
+    Args:
+        cache_id: Opaque cache handle (must already exist).
+        position: Target token position to restore to (0 ≤ position ≤ current length).
+        cache_store: Shared KV cache store.
+        lock: Async lock serialising model access.
+
+    Returns:
+        *position* — the restored token position.
+
+    Raises:
+        ValueError: If *cache_id* is not found or *position* is out of range.
+    """
+    entry = cache_store.get(cache_id)
+    if entry is None:
+        raise ValueError(f"cache not found: {cache_id!r}")
+    if position < 0 or position > entry.length:
+        raise ValueError(f"position {position} out of range [0, {entry.length}]")
+
+    tokens_to_trim = entry.length - position
+
+    async with lock:
+        await asyncio.to_thread(_sync_rollback, entry.cache, tokens_to_trim)
+
+    cache_store.put(cache_id, CacheEntry(cache=entry.cache, length=position))
+    return position
+
+
+# ---------------------------------------------------------------------------
+# evict
+# ---------------------------------------------------------------------------
+
+
+async def evict(cache_id: str, cache_store: KVCacheStore) -> bool:
+    """Free GPU memory for *cache_id* by removing it from the cache store.
+
+    Args:
+        cache_id: Opaque cache handle to remove.
+        cache_store: Shared KV cache store.
+
+    Returns:
+        True if the entry was removed.
+
+    Raises:
+        ValueError: If *cache_id* is not found in the store.
+    """
+    deleted = cache_store.delete(cache_id)
+    if not deleted:
+        raise ValueError(f"cache not found: {cache_id!r}")
+    return True
