@@ -39,7 +39,15 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class StatusTracker:
-    """Lightweight, read-only-observable record of server activity."""
+    """Lightweight, read-only-observable record of server activity.
+
+    checkpoint_present / checkpoint_tokens track a single global position,
+    not per-cache-id state.  This is acceptable because mlx-kv-server is
+    single-daemon: only one cache_id is active at a time in normal operation.
+    If multiple cache_ids are ever in use simultaneously the checkpoint fields
+    will reflect only the most recent checkpoint call, regardless of which
+    cache_id it came from.
+    """
 
     start_time: float = field(default_factory=time.monotonic)
     last_operation: str | None = None
@@ -55,6 +63,13 @@ class StatusTracker:
         self.record("checkpoint")
 
     def clear_checkpoint(self) -> None:
+        """Clear the stored checkpoint position.
+
+        Called from two distinct code paths for different semantic reasons:
+        - rollback: the cache position has changed, making the prior checkpoint
+          position a stale reference that may no longer be reachable.
+        - evict: the cache entry is gone entirely, so the checkpoint is moot.
+        """
         self.last_checkpoint_position = None
 
 
@@ -187,7 +202,11 @@ async def _handle_status(
             "result": {
                 "cache_used_tokens": used,
                 "cache_capacity_tokens": capacity,
-                "cache_used_fraction": used / capacity if capacity > 0 else 0.0,
+                # Informational only — total_tokens() is not capped, so clamp
+                # to 1.0 rather than returning a fraction > 1 when over capacity.
+                "cache_used_fraction": (
+                    min(used / capacity, 1.0) if capacity > 0 else 0.0
+                ),
                 "checkpoint_present": checkpoint_pos is not None,
                 "checkpoint_tokens": checkpoint_pos,
                 "last_operation": tracker.last_operation,

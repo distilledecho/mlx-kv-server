@@ -466,6 +466,197 @@ class TestStatusEndpoint:
         assert result["checkpoint_present"] is False
         assert result["checkpoint_tokens"] is None
 
+    def test_status_last_operation_reflects_prefill(self) -> None:
+        socket_path = _sock_path()
+
+        async def run() -> dict[str, Any]:
+            model = _make_model()
+            tokenizer = _make_tokenizer()
+            store = KVCacheStore()
+            lock = asyncio.Lock()
+            config = _config(socket_path)
+            server = await _start_server(
+                socket_path, model, tokenizer, store, lock, config
+            )
+            async with server:
+                with patch(
+                    "mlx_kv_server.server.prefill", new_callable=AsyncMock
+                ) as mp:
+                    mp.return_value = "c1"
+                    await _send_recv_one(
+                        socket_path,
+                        {
+                            "id": 1,
+                            "method": "prefill",
+                            "params": {"tokens": [1, 2], "cache_id": "c1"},
+                        },
+                    )
+                return await _send_recv_one(
+                    socket_path,
+                    {"id": 2, "method": "status", "params": {}},
+                )
+
+        try:
+            resp = asyncio.run(run())
+        finally:
+            _cleanup(socket_path)
+
+        assert resp["result"]["last_operation"] == "prefill"
+        assert resp["result"]["last_operation_at"] is not None
+
+    def test_status_last_operation_reflects_generate(self) -> None:
+        socket_path = _sock_path()
+
+        async def fake_generate(*args: Any, **kwargs: Any) -> AsyncGenerator[int, None]:
+            yield 42
+
+        async def run() -> dict[str, Any]:
+            model = _make_model()
+            tokenizer = _make_tokenizer()
+            store = KVCacheStore()
+            store.put("c1", CacheEntry(cache=[MagicMock()], length=10))
+            lock = asyncio.Lock()
+            config = _config(socket_path)
+            server = await _start_server(
+                socket_path, model, tokenizer, store, lock, config
+            )
+            async with server:
+                with patch("mlx_kv_server.server.generate", new=fake_generate):
+                    await _send_recv_all(
+                        socket_path,
+                        {
+                            "id": 1,
+                            "method": "generate",
+                            "params": {"tokens": [1], "cache_id": "c1"},
+                        },
+                    )
+                return await _send_recv_one(
+                    socket_path,
+                    {"id": 2, "method": "status", "params": {}},
+                )
+
+        try:
+            resp = asyncio.run(run())
+        finally:
+            _cleanup(socket_path)
+
+        assert resp["result"]["last_operation"] == "generate"
+        assert resp["result"]["last_operation_at"] is not None
+
+    def test_status_checkpoint_cleared_after_rollback(self) -> None:
+        socket_path = _sock_path()
+
+        async def run() -> dict[str, Any]:
+            model = _make_model()
+            tokenizer = _make_tokenizer()
+            store = KVCacheStore()
+            store.put("c1", CacheEntry(cache=[MagicMock()], length=100))
+            lock = asyncio.Lock()
+            config = _config(socket_path)
+            tracker = StatusTracker()
+            server = await _start_server(
+                socket_path, model, tokenizer, store, lock, config, tracker
+            )
+            async with server:
+                with patch(
+                    "mlx_kv_server.server.checkpoint", new_callable=AsyncMock
+                ) as mp:
+                    mp.return_value = 100
+                    await _send_recv_one(
+                        socket_path,
+                        {
+                            "id": 1,
+                            "method": "checkpoint",
+                            "params": {"cache_id": "c1"},
+                        },
+                    )
+                with patch(
+                    "mlx_kv_server.server.rollback", new_callable=AsyncMock
+                ) as mr:
+                    mr.return_value = 50
+                    await _send_recv_one(
+                        socket_path,
+                        {
+                            "id": 2,
+                            "method": "rollback",
+                            "params": {"cache_id": "c1", "position": 50},
+                        },
+                    )
+                return await _send_recv_one(
+                    socket_path,
+                    {"id": 3, "method": "status", "params": {}},
+                )
+
+        try:
+            resp = asyncio.run(run())
+        finally:
+            _cleanup(socket_path)
+
+        result = resp["result"]
+        assert result["last_operation"] == "rollback"
+        assert result["checkpoint_present"] is False
+        assert result["checkpoint_tokens"] is None
+
+    def test_status_cache_used_fraction_zero_when_capacity_is_zero(self) -> None:
+        socket_path = _sock_path()
+
+        async def run() -> dict[str, Any]:
+            model = _make_model()
+            tokenizer = _make_tokenizer()
+            store = KVCacheStore()
+            store.put("c1", CacheEntry(cache=[MagicMock()], length=100))
+            lock = asyncio.Lock()
+            config = Config(
+                socket_path=socket_path,
+                model_name="test-model",
+                cache_capacity_tokens=0,
+            )
+            server = await _start_server(
+                socket_path, model, tokenizer, store, lock, config
+            )
+            async with server:
+                return await _send_recv_one(
+                    socket_path,
+                    {"id": 1, "method": "status", "params": {}},
+                )
+
+        try:
+            resp = asyncio.run(run())
+        finally:
+            _cleanup(socket_path)
+
+        assert resp["result"]["cache_used_fraction"] == 0.0
+
+    def test_status_cache_used_fraction_clamped_when_over_capacity(self) -> None:
+        socket_path = _sock_path()
+
+        async def run() -> dict[str, Any]:
+            model = _make_model()
+            tokenizer = _make_tokenizer()
+            store = KVCacheStore()
+            store.put("c1", CacheEntry(cache=[MagicMock()], length=9000))
+            lock = asyncio.Lock()
+            config = Config(
+                socket_path=socket_path,
+                model_name="test-model",
+                cache_capacity_tokens=8192,
+            )
+            server = await _start_server(
+                socket_path, model, tokenizer, store, lock, config
+            )
+            async with server:
+                return await _send_recv_one(
+                    socket_path,
+                    {"id": 1, "method": "status", "params": {}},
+                )
+
+        try:
+            resp = asyncio.run(run())
+        finally:
+            _cleanup(socket_path)
+
+        assert resp["result"]["cache_used_fraction"] == 1.0
+
 
 class TestServerSocketCleanup:
     def test_stale_socket_removed_on_start(self) -> None:
