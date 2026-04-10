@@ -20,6 +20,9 @@ import asyncio
 import json
 import logging
 import os
+import time
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import Any
 
 from .cache import KVCacheStore
@@ -27,6 +30,32 @@ from .config import Config
 from .primitives import checkpoint, evict, generate, prefill, rollback
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Status tracking
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class StatusTracker:
+    """Lightweight, read-only-observable record of server activity."""
+
+    start_time: float = field(default_factory=time.monotonic)
+    last_operation: str | None = None
+    last_operation_at: datetime | None = None
+    last_checkpoint_position: int | None = None
+
+    def record(self, operation: str) -> None:
+        self.last_operation = operation
+        self.last_operation_at = datetime.now(UTC)
+
+    def record_checkpoint(self, position: int) -> None:
+        self.last_checkpoint_position = position
+        self.record("checkpoint")
+
+    def clear_checkpoint(self) -> None:
+        self.last_checkpoint_position = None
 
 
 # ---------------------------------------------------------------------------
@@ -61,10 +90,12 @@ async def _handle_prefill(
     model: Any,
     cache_store: KVCacheStore,
     lock: asyncio.Lock,
+    tracker: StatusTracker,
 ) -> None:
     tokens: list[int] = params["tokens"]
     cache_id: str = params["cache_id"]
     handle = await prefill(tokens, cache_id, model, cache_store, lock)
+    tracker.record("prefill")
     await _send(writer, {"id": req_id, "result": {"handle": handle}})
 
 
@@ -77,6 +108,7 @@ async def _handle_generate(
     cache_store: KVCacheStore,
     lock: asyncio.Lock,
     config: Config,
+    tracker: StatusTracker,
 ) -> None:
     tokens: list[int] = params["tokens"]
     cache_id: str = params["cache_id"]
@@ -91,6 +123,7 @@ async def _handle_generate(
         temperature=config.temperature,
     ):
         await _send(writer, {"id": req_id, "token": token})
+    tracker.record("generate")
     await _send(writer, {"id": req_id, "done": True})
 
 
@@ -99,9 +132,11 @@ async def _handle_checkpoint(
     req_id: int,
     params: dict[str, Any],
     cache_store: KVCacheStore,
+    tracker: StatusTracker,
 ) -> None:
     cache_id: str = params["cache_id"]
     position = await checkpoint(cache_id, cache_store)
+    tracker.record_checkpoint(position)
     await _send(writer, {"id": req_id, "result": {"position": position}})
 
 
@@ -110,10 +145,13 @@ async def _handle_rollback(
     req_id: int,
     params: dict[str, Any],
     cache_store: KVCacheStore,
+    tracker: StatusTracker,
 ) -> None:
     cache_id: str = params["cache_id"]
     position: int = int(params["position"])
     restored = await rollback(cache_id, position, cache_store)
+    tracker.clear_checkpoint()
+    tracker.record("rollback")
     await _send(writer, {"id": req_id, "result": {"position": restored}})
 
 
@@ -122,10 +160,45 @@ async def _handle_evict(
     req_id: int,
     params: dict[str, Any],
     cache_store: KVCacheStore,
+    tracker: StatusTracker,
 ) -> None:
     cache_id: str = params["cache_id"]
     await evict(cache_id, cache_store)
+    tracker.clear_checkpoint()
+    tracker.record("evict")
     await _send(writer, {"id": req_id, "result": {"freed": cache_id}})
+
+
+async def _handle_status(
+    writer: asyncio.StreamWriter,
+    req_id: int,
+    cache_store: KVCacheStore,
+    config: Config,
+    tracker: StatusTracker,
+) -> None:
+    used = cache_store.total_tokens()
+    capacity = config.cache_capacity_tokens
+    checkpoint_pos = tracker.last_checkpoint_position
+    last_op_at = tracker.last_operation_at
+    await _send(
+        writer,
+        {
+            "id": req_id,
+            "result": {
+                "cache_used_tokens": used,
+                "cache_capacity_tokens": capacity,
+                "cache_used_fraction": used / capacity if capacity > 0 else 0.0,
+                "checkpoint_present": checkpoint_pos is not None,
+                "checkpoint_tokens": checkpoint_pos,
+                "last_operation": tracker.last_operation,
+                "last_operation_at": (
+                    last_op_at.isoformat() if last_op_at is not None else None
+                ),
+                "model": config.model_name,
+                "uptime_seconds": int(time.monotonic() - tracker.start_time),
+            },
+        },
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -141,6 +214,7 @@ async def _handle_connection(
     cache_store: KVCacheStore,
     lock: asyncio.Lock,
     config: Config,
+    tracker: StatusTracker,
 ) -> None:
     peer = writer.get_extra_info("peername") or "<unix>"
     logger.info("connection accepted from %s", peer)
@@ -163,7 +237,7 @@ async def _handle_connection(
             try:
                 if method == "prefill":
                     await _handle_prefill(
-                        writer, req_id, params, model, cache_store, lock
+                        writer, req_id, params, model, cache_store, lock, tracker
                     )
                 elif method == "generate":
                     await _handle_generate(
@@ -175,13 +249,18 @@ async def _handle_connection(
                         cache_store,
                         lock,
                         config,
+                        tracker,
                     )
                 elif method == "checkpoint":
-                    await _handle_checkpoint(writer, req_id, params, cache_store)
+                    await _handle_checkpoint(
+                        writer, req_id, params, cache_store, tracker
+                    )
                 elif method == "rollback":
-                    await _handle_rollback(writer, req_id, params, cache_store)
+                    await _handle_rollback(writer, req_id, params, cache_store, tracker)
                 elif method == "evict":
-                    await _handle_evict(writer, req_id, params, cache_store)
+                    await _handle_evict(writer, req_id, params, cache_store, tracker)
+                elif method == "status":
+                    await _handle_status(writer, req_id, cache_store, config, tracker)
                 else:
                     await _send_error(writer, req_id, f"unknown method: {method!r}")
             except (KeyError, TypeError) as exc:
@@ -230,9 +309,12 @@ async def run_server(
         os.remove(socket_path)
 
     lock = asyncio.Lock()
+    tracker = StatusTracker()
 
     async def handler(r: asyncio.StreamReader, w: asyncio.StreamWriter) -> None:
-        await _handle_connection(r, w, model, tokenizer, cache_store, lock, config)
+        await _handle_connection(
+            r, w, model, tokenizer, cache_store, lock, config, tracker
+        )
 
     server = await asyncio.start_unix_server(handler, path=socket_path)
 

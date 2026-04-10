@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from mlx_kv_server.cache import CacheEntry, KVCacheStore
 from mlx_kv_server.config import Config
-from mlx_kv_server.server import _handle_connection
+from mlx_kv_server.server import StatusTracker, _handle_connection
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -45,11 +45,15 @@ async def _start_server(
     cache_store: KVCacheStore,
     lock: asyncio.Lock,
     config: Config,
+    tracker: StatusTracker | None = None,
 ) -> asyncio.AbstractServer:
     """Start a short-lived test server using _handle_connection."""
+    _tracker = tracker if tracker is not None else StatusTracker()
 
     async def handler(r: asyncio.StreamReader, w: asyncio.StreamWriter) -> None:
-        await _handle_connection(r, w, model, tokenizer, cache_store, lock, config)
+        await _handle_connection(
+            r, w, model, tokenizer, cache_store, lock, config, _tracker
+        )
 
     return await asyncio.start_unix_server(handler, path=socket_path)
 
@@ -325,6 +329,142 @@ class TestGenerateRequests:
 
         assert resp["id"] == 2
         assert "error" in resp
+
+
+class TestStatusEndpoint:
+    def test_status_returns_correct_schema(self) -> None:
+        socket_path = _sock_path()
+
+        async def run() -> dict[str, Any]:
+            model = _make_model()
+            tokenizer = _make_tokenizer()
+            store = KVCacheStore()
+            store.put("c1", CacheEntry(cache=[MagicMock()], length=512))
+            lock = asyncio.Lock()
+            config = _config(socket_path)
+            server = await _start_server(
+                socket_path, model, tokenizer, store, lock, config
+            )
+            async with server:
+                return await _send_recv_one(
+                    socket_path,
+                    {"id": 1, "method": "status", "params": {}},
+                )
+
+        try:
+            resp = asyncio.run(run())
+        finally:
+            _cleanup(socket_path)
+
+        assert resp["id"] == 1
+        result = resp["result"]
+        assert result["cache_used_tokens"] == 512
+        assert result["cache_capacity_tokens"] == 8192
+        assert abs(result["cache_used_fraction"] - 512 / 8192) < 1e-9
+        assert result["checkpoint_present"] is False
+        assert result["checkpoint_tokens"] is None
+        assert result["last_operation"] is None
+        assert result["last_operation_at"] is None
+        assert result["model"] == "test-model"
+        assert isinstance(result["uptime_seconds"], int)
+
+    def test_status_reflects_last_operation_and_checkpoint(self) -> None:
+        socket_path = _sock_path()
+
+        async def run() -> tuple[dict[str, Any], dict[str, Any]]:
+            model = _make_model()
+            tokenizer = _make_tokenizer()
+            store = KVCacheStore()
+            store.put("c1", CacheEntry(cache=[MagicMock()], length=100))
+            lock = asyncio.Lock()
+            config = _config(socket_path)
+            tracker = StatusTracker()
+            server = await _start_server(
+                socket_path, model, tokenizer, store, lock, config, tracker
+            )
+            async with server:
+                with patch(
+                    "mlx_kv_server.server.checkpoint", new_callable=AsyncMock
+                ) as mp:
+                    mp.return_value = 100
+                    await _send_recv_one(
+                        socket_path,
+                        {
+                            "id": 1,
+                            "method": "checkpoint",
+                            "params": {"cache_id": "c1"},
+                        },
+                    )
+                status_resp = await _send_recv_one(
+                    socket_path,
+                    {"id": 2, "method": "status", "params": {}},
+                )
+            return status_resp
+
+        try:
+            resp = asyncio.run(run())
+        finally:
+            _cleanup(socket_path)
+
+        result = resp["result"]
+        assert result["last_operation"] == "checkpoint"
+        assert result["last_operation_at"] is not None
+        assert result["checkpoint_present"] is True
+        assert result["checkpoint_tokens"] == 100
+
+    def test_status_checkpoint_cleared_after_evict(self) -> None:
+        socket_path = _sock_path()
+
+        async def run() -> dict[str, Any]:
+            model = _make_model()
+            tokenizer = _make_tokenizer()
+            store = KVCacheStore()
+            store.put("c1", CacheEntry(cache=[MagicMock()], length=100))
+            lock = asyncio.Lock()
+            config = _config(socket_path)
+            tracker = StatusTracker()
+            server = await _start_server(
+                socket_path, model, tokenizer, store, lock, config, tracker
+            )
+            async with server:
+                with patch(
+                    "mlx_kv_server.server.checkpoint", new_callable=AsyncMock
+                ) as mp:
+                    mp.return_value = 100
+                    await _send_recv_one(
+                        socket_path,
+                        {
+                            "id": 1,
+                            "method": "checkpoint",
+                            "params": {"cache_id": "c1"},
+                        },
+                    )
+                # Re-add entry so evict can find it
+                store.put("c1", CacheEntry(cache=[MagicMock()], length=100))
+                with patch("mlx_kv_server.server.evict", new_callable=AsyncMock) as me:
+                    me.return_value = True
+                    await _send_recv_one(
+                        socket_path,
+                        {
+                            "id": 2,
+                            "method": "evict",
+                            "params": {"cache_id": "c1"},
+                        },
+                    )
+                return await _send_recv_one(
+                    socket_path,
+                    {"id": 3, "method": "status", "params": {}},
+                )
+
+        try:
+            resp = asyncio.run(run())
+        finally:
+            _cleanup(socket_path)
+
+        result = resp["result"]
+        assert result["last_operation"] == "evict"
+        assert result["checkpoint_present"] is False
+        assert result["checkpoint_tokens"] is None
 
 
 class TestServerSocketCleanup:

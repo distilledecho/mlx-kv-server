@@ -41,5 +41,9 @@ class KVCacheStore:
         """Return True if *cache_id* is present."""
         return cache_id in self._store
 
+    def total_tokens(self) -> int:
+        """Return the total number of tokens across all active cache entries."""
+        return sum(entry.length for entry in self._store.values())
+
     def __len__(self) -> int:
         return len(self._store)
