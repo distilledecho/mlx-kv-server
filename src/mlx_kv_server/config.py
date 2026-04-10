@@ -12,6 +12,7 @@ class Config:
     model_name: str
     max_tokens: int = 512
     temperature: float = 0.0
+    cache_capacity_tokens: int = 8192
     extra: dict[str, object] = field(default_factory=dict)
 
 
@@ -36,4 +37,5 @@ def load_config(path: str) -> Config:
         model_name=data["model_name"],
         max_tokens=int(data.get("max_tokens", 512)),
         temperature=float(data.get("temperature", 0.0)),
+        cache_capacity_tokens=int(data.get("cache_capacity_tokens", 8192)),
     )
