@@ -1,7 +1,7 @@
 # CLAUDE.md — mlx-kv-server
 
 > Instructions for Claude Code. Read this file before writing any code in this repo.
-> For project-wide architecture context, design principles, and vision: see `daemon` repo — `CLAUDE.md` and `PRD.md`.
+> For project-wide architecture context, design principles, and vision: see `kai-project` — `kai-architecture.md` and `kai-philosophy.md`.
 
 **At the start of every session, before writing any code:**
 
@@ -53,6 +53,7 @@ The server binds to a Unix socket (path from config). The `daemon` container con
 | `checkpoint` | `checkpoint(cache_id)` → snapshot | Snapshots current cache state |
 | `rollback` | `rollback(cache_id, position)` → restored | Restores cache to a prior position |
 | `evict` | `evict(cache_id)` → freed | Frees GPU memory for a cache slot |
+| `status` | `status()` → KVServerStatus | Returns KV cache state snapshot — read-only, never modifies state |
 
 **The container never touches KV tensors directly.** Cache handles are opaque references. All tensor operations stay in this server.
 
@@ -182,8 +183,8 @@ When reviewing a PR, check:
 4. **Container boundary** — does anything expose KV tensors directly? Cache handles must remain opaque references.
 5. **No containerization** — does this PR add a Dockerfile or container CI? It must not.
 6. **Tests** — does every new primitive have a corresponding test? Cache state transitions tested?
-7. **Scope** — does this change add anything outside the five primitives and cache management?
-8. **ADR** — does this contradict any resolved decision in the `daemon` repo PRD.md without a filed ADR?
+7. **Scope** — does this change add anything outside the five primitives, status endpoint, and cache management?
+8. **ADR** — does this contradict any resolved decision in `adr-001-mlx-kv-server-status-endpoint.md` in `kai-project/docs/` without a filed ADR?
 
 ---
 
@@ -198,4 +199,4 @@ Before implementing anything that touches these areas, flag rather than assume:
 
 - Not a general inference API (use LM Studio or mlx-lm serve for that)
 - Not a multi-user server (single-user, single-daemon connection)
-- Not containerized (bare metal macOS only, by design — see ADR #3 in `daemon` repo)
+- Not containerized (bare metal macOS only, by design — see `adr-001-mlx-kv-server-status-endpoint.md` in `kai-project/docs/`)
