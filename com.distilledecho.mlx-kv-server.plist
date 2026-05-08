@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  launchd user agent — mlx-kv-server
+  Manages the MLX KV tensor cache server as a persistent macOS user service.
+
+  Install:   launchctl load ~/dev/mlx-kv-server/com.distilledecho.mlx-kv-server.plist
+  Uninstall: launchctl unload ~/dev/mlx-kv-server/com.distilledecho.mlx-kv-server.plist
+  Logs:      tail -f ~/dev/mlx-kv-server/logs/stdout.log
+
+  NOTE: ProgramArguments[0] must be the absolute path to uv.
+  Verified location on this machine: /opt/homebrew/bin/uv
+  If uv moves (e.g. after a reinstall), update the path below and reload.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.distilledecho.mlx-kv-server</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/opt/homebrew/bin/uv</string>
+        <string>run</string>
+        <string>python</string>
+        <string>-m</string>
+        <string>mlx_kv_server</string>
+        <string>--config</string>
+        <string>config.toml</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/hiran/dev/mlx-kv-server</string>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>RunAtLoad</key>
+    <false/>
+
+    <!-- Prevent rapid crash loops (Metal GPU timeouts cause abrupt termination) -->
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+
+    <key>StandardOutPath</key>
+    <string>/Users/hiran/dev/mlx-kv-server/logs/stdout.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/hiran/dev/mlx-kv-server/logs/stderr.log</string>
+</dict>
+</plist>

@@ -77,6 +77,56 @@ View the version:
 uv run python -m mlx_kv_server --version
 ```
 
+## Running as a launchd Service
+
+The recommended way to run mlx-kv-server in production is as a macOS user agent via launchd. This ensures the server restarts automatically after a crash (including Metal GPU timeouts, which cause abrupt termination).
+
+### Install
+
+```bash
+launchctl load ~/dev/mlx-kv-server/com.distilledecho.mlx-kv-server.plist
+```
+
+This registers the service. The server does **not** start immediately (`RunAtLoad` is false) — start it manually after loading:
+
+```bash
+launchctl start com.distilledecho.mlx-kv-server
+```
+
+### Stop / Start / Restart
+
+```bash
+# Stop (launchd will restart it after ThrottleInterval if KeepAlive is active)
+launchctl stop com.distilledecho.mlx-kv-server
+
+# To stop permanently without restarting, unload first (see Uninstall below)
+
+# Start manually
+launchctl start com.distilledecho.mlx-kv-server
+```
+
+### Logs
+
+stdout and stderr are written to separate files:
+
+```bash
+tail -f ~/dev/mlx-kv-server/logs/stdout.log
+tail -f ~/dev/mlx-kv-server/logs/stderr.log
+```
+
+### Uninstall
+
+```bash
+launchctl unload ~/dev/mlx-kv-server/com.distilledecho.mlx-kv-server.plist
+```
+
+This stops the server and removes launchd's awareness of it. The plist file remains on disk; re-load to re-register.
+
+### Notes
+
+- `ThrottleInterval` is set to 10 seconds to avoid rapid crash loops on Metal GPU failures.
+- The plist hardcodes the absolute path to `uv` (`/opt/homebrew/bin/uv`). If uv is reinstalled elsewhere, update `ProgramArguments[0]` in the plist and reload.
+
 <!-- README only content. Anything below this line won't be included in index.md -->
 
 See https://distilledecho.github.io/mlx-kv-server for more detailed documentation.
